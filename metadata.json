@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Texas Hold'em",
+  "description": "A 9-player Texas Hold'em Poker game where you play against 8 AI bots powered by Google Gemini. Features random seating, configurable buy-ins, and intelligent AI decision-making.",
+  "requestFramePermissions": []
+}
