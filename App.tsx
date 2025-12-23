@@ -50,19 +50,6 @@ const App: React.FC = () => {
     setGameState(prev => ({ ...prev, message: msg }));
   };
 
-  const getNextActivePlayer = (startIndex: number, players: Player[]): number => {
-    let count = 0;
-    let idx = startIndex;
-    while (count < players.length) {
-      idx = (idx + 1) % players.length;
-      if (players[idx].status === PlayerStatus.ACTIVE || (players[idx].status === PlayerStatus.ALL_IN && players[idx].currentBet < gameStateRef.current.currentHighBet)) {
-        if (players[idx].status === PlayerStatus.ACTIVE) return idx;
-      }
-      count++;
-    }
-    return -1; // No active players left to act
-  };
-
   // -------------------------------------------------------------------------
   // Game Setup
   // -------------------------------------------------------------------------
@@ -93,9 +80,8 @@ const App: React.FC = () => {
   };
 
   const startNewHand = (currentPlayers: Player[], dealerIdx: number) => {
-    // 1. Reset statuses based on chips
-    // Any player with 0 chips is BUSTED.
-    // Any player with > 0 chips is ACTIVE (even if they were folded or all-in previously)
+    // 1. Reset statuses based on chips ONLY.
+    // This is the core logic that decides if someone is BUSTED or ACTIVE.
     const players = currentPlayers.map(p => ({
         ...p,
         status: p.chips > 0 ? PlayerStatus.ACTIVE : PlayerStatus.BUSTED,
@@ -105,31 +91,29 @@ const App: React.FC = () => {
         totalHandBet: 0
     }));
 
-    // 2. Check Victory/Defeat Conditions
+    // 2. CHECK GAME OVER CONDITION
+    // Game ends IF user is busted OR ALL bots are busted.
     const user = players.find(p => p.role === PlayerRole.USER);
     const activeBots = players.filter(p => p.role === PlayerRole.BOT && p.status === PlayerStatus.ACTIVE);
     
-    let isGameOver = false;
-    let gameOverMsg = "";
-
-    // If user is busted, Game Over (Defeat)
     if (!user || user.status === PlayerStatus.BUSTED) {
-         isGameOver = true;
-         gameOverMsg = "You have been eliminated.";
-    } 
-    // If user is active but no bots are active, Game Over (Victory)
-    else if (activeBots.length === 0) {
-         isGameOver = true;
-         gameOverMsg = "You are the Champion!";
-    }
-
-    if (isGameOver) {
          setGameState(prev => ({ 
             ...prev, 
             players, 
             isGameRunning: false, 
             phase: GamePhase.GAME_OVER,
-            message: gameOverMsg
+            message: "You have been eliminated."
+        }));
+        return;
+    } 
+    
+    if (activeBots.length === 0) {
+         setGameState(prev => ({ 
+            ...prev, 
+            players, 
+            isGameRunning: false, 
+            phase: GamePhase.GAME_OVER,
+            message: "You are the Champion! You've won all the chips!"
         }));
         return;
     }
@@ -144,8 +128,7 @@ const App: React.FC = () => {
         }
     }
 
-    // Blinds
-    // Find next active player after dealer for SB
+    // Blinds calculation
     let sbIndex = (dealerIdx + 1) % TOTAL_PLAYERS;
     while(players[sbIndex].status === PlayerStatus.BUSTED) sbIndex = (sbIndex + 1) % TOTAL_PLAYERS;
     
@@ -183,14 +166,10 @@ const App: React.FC = () => {
         smallBlindIndex: sbIndex,
         bigBlindIndex: bbIndex,
         showdownResults: [],
-        message: "New Hand! Pre-Flop."
+        message: "New Hand Started"
     });
   };
 
-  // -------------------------------------------------------------------------
-  // Core Game Loop / Turn Management
-  // -------------------------------------------------------------------------
-  
   // Effect to trigger Bot Turns
   useEffect(() => {
     if (!gameState.isGameRunning) return;
@@ -220,7 +199,7 @@ const App: React.FC = () => {
         const decision = await getBotDecision(currentState, player);
         executePlayerAction(playerIdx, decision.action, decision.raiseAmount);
     } catch (e) {
-        console.error("Bot failed to think", e);
+        console.warn("Bot AI error, falling back to fold/check.");
         executePlayerAction(playerIdx, 'FOLD');
     }
   };
@@ -250,52 +229,30 @@ const App: React.FC = () => {
             p.lastAction = 'Call';
             msg += 'called.';
         } else if (action === 'RAISE' || action === 'BET') {
-            // Updated Rule: Min raise is Double the current high bet (or MinBet if 0)
             const minRaiseAbs = prev.currentHighBet > 0 ? prev.currentHighBet * 2 : prev.minBet;
-            
             let raiseTo = amount || minRaiseAbs;
-            
-            // Validation
             const maxTotal = p.chips + p.currentBet;
-            
-            // If user goes ALL IN with less than min raise, we handle as ALL IN implicitly
             if (raiseTo > maxTotal) raiseTo = maxTotal;
-
-            // Enforce Min Raise Rule (unless All-In)
-            if (raiseTo < minRaiseAbs && raiseTo < maxTotal) {
-                raiseTo = minRaiseAbs; 
-            }
+            if (raiseTo < minRaiseAbs && raiseTo < maxTotal) raiseTo = minRaiseAbs;
 
             const addedChips = raiseTo - p.currentBet;
-            
-            // Sanity check to prevent negative chips
             if (addedChips > p.chips) {
-                 // Should ideally be All-In, but let's clamp
-                 p.status = PlayerStatus.ALL_IN;
-                 p.lastAction = 'All In';
-                 msg += 'went All In!';
                  const actualAdd = p.chips;
                  p.chips = 0;
                  p.currentBet += actualAdd;
                  p.totalHandBet += actualAdd;
                  newPot += actualAdd;
+                 p.status = PlayerStatus.ALL_IN;
+                 p.lastAction = 'All In';
                  if (p.currentBet > newHighBet) newHighBet = p.currentBet;
             } else {
                 p.chips -= addedChips;
                 p.currentBet = raiseTo;
                 p.totalHandBet += addedChips;
                 newPot += addedChips;
-                
                 if (raiseTo > newHighBet) newHighBet = raiseTo;
                 if (p.chips === 0) p.status = PlayerStatus.ALL_IN;
-                
-                if (action === 'BET') {
-                     p.lastAction = `Bet ${raiseTo}`;
-                     msg += `bet ${raiseTo}.`;
-                } else {
-                     p.lastAction = `Raise to ${raiseTo}`;
-                     msg += `raised to ${raiseTo}.`;
-                }
+                p.lastAction = action === 'BET' ? `Bet ${raiseTo}` : `Raise to ${raiseTo}`;
             }
         } else if (action === 'ALL_IN') {
              const allInAmt = p.chips;
@@ -305,49 +262,33 @@ const App: React.FC = () => {
              p.totalHandBet += allInAmt;
              newPot += allInAmt;
              p.status = PlayerStatus.ALL_IN;
-             
              if (totalBet > newHighBet) newHighBet = totalBet;
              p.lastAction = 'All In';
              msg += 'went All In!';
         }
 
-        return {
-            ...prev,
-            players: newPlayers,
-            pot: newPot,
-            currentHighBet: newHighBet,
-            message: msg
-        };
+        return { ...prev, players: newPlayers, pot: newPot, currentHighBet: newHighBet, message: msg };
     });
 
-    setTimeout(() => {
-        advanceTurn();
-    }, 400); // UI visual update delay
+    setTimeout(() => advanceTurn(), 300);
   };
 
   const advanceTurn = () => {
     const currentState = gameStateRef.current;
-    
-    const activePlayers = currentState.players.filter(p => p.status !== PlayerStatus.FOLDED && p.status !== PlayerStatus.BUSTED);
-    const notAllIn = activePlayers.filter(p => p.status !== PlayerStatus.ALL_IN);
-    
-    // Check if only 1 player remains
     const nonFolded = currentState.players.filter(p => p.status !== PlayerStatus.FOLDED && p.status !== PlayerStatus.BUSTED);
+    
     if (nonFolded.length === 1) {
-        resolveWinner(nonFolded);
+        resolveWinner(currentState.players);
         return;
     }
 
-    const allMatched = notAllIn.every(p => p.currentBet === currentState.currentHighBet);
-    const everyoneActed = notAllIn.every(p => p.lastAction !== undefined);
+    const activePlayers = currentState.players.filter(p => p.status === PlayerStatus.ACTIVE);
+    const allInPlayers = currentState.players.filter(p => p.status === PlayerStatus.ALL_IN);
 
-    // If everyone is all in or matching bets
-    if (activePlayers.length > 0 && (activePlayers.every(p => p.status === PlayerStatus.ALL_IN) || (notAllIn.length <= 1 && allMatched))) {
-        nextPhase();
-        return;
-    }
-
-    if (allMatched && everyoneActed) {
+    // If everyone who can act has matched the high bet, go to next phase
+    const allMatched = activePlayers.every(p => p.currentBet === currentState.currentHighBet && p.lastAction !== undefined);
+    
+    if (activePlayers.length === 0 || (activePlayers.length === 1 && allMatched) || allMatched) {
         nextPhase();
         return;
     }
@@ -355,15 +296,12 @@ const App: React.FC = () => {
     // Find next player
     let nextIdx = (currentState.activePlayerIndex + 1) % TOTAL_PLAYERS;
     let found = false;
-    let loops = 0;
-    while(loops < TOTAL_PLAYERS) {
-        const p = currentState.players[nextIdx];
-        if (p.status === PlayerStatus.ACTIVE) {
+    for (let i = 0; i < TOTAL_PLAYERS; i++) {
+        if (currentState.players[nextIdx].status === PlayerStatus.ACTIVE) {
             found = true;
             break;
         }
         nextIdx = (nextIdx + 1) % TOTAL_PLAYERS;
-        loops++;
     }
 
     if (found) {
@@ -375,14 +313,7 @@ const App: React.FC = () => {
 
   const nextPhase = () => {
     const currentState = gameStateRef.current;
-    
-    // Reset bets for new round
-    const updatedPlayers = currentState.players.map(p => ({
-        ...p,
-        currentBet: 0,
-        lastAction: undefined 
-    }));
-    
+    const updatedPlayers = currentState.players.map(p => ({ ...p, currentBet: 0, lastAction: undefined }));
     let nextPhaseEnum: GamePhase = GamePhase.PRE_FLOP;
     let nextCommCards = [...currentState.communityCards];
     const deck = [...currentState.deck];
@@ -401,48 +332,25 @@ const App: React.FC = () => {
         return;
     }
 
-    // Determine first player to act (Left of Dealer)
+    // Determine first player to act
     let firstIdx = (currentState.dealerIndex + 1) % TOTAL_PLAYERS;
-    while(updatedPlayers[firstIdx].status !== PlayerStatus.ACTIVE && updatedPlayers[firstIdx].status !== PlayerStatus.ALL_IN) {
+    while(updatedPlayers[firstIdx].status !== PlayerStatus.ACTIVE && updatedPlayers[firstIdx].status !== PlayerStatus.ALL_IN && updatedPlayers[firstIdx].status !== PlayerStatus.FOLDED) {
         firstIdx = (firstIdx + 1) % TOTAL_PLAYERS;
-        if(updatedPlayers.filter(p => p.status !== PlayerStatus.BUSTED).length === 0) break;
     }
     
-    // Handle All-In Case for next phase start
-    if (updatedPlayers[firstIdx].status === PlayerStatus.ALL_IN) {
-        let tempIdx = firstIdx;
-        let activeFound = false;
-        for(let i=0; i<TOTAL_PLAYERS; i++) {
-             if(updatedPlayers[tempIdx].status === PlayerStatus.ACTIVE) {
-                 firstIdx = tempIdx;
-                 activeFound = true;
-                 break;
-             }
-             tempIdx = (tempIdx + 1) % TOTAL_PLAYERS;
-        }
-        if (!activeFound) {
-             setGameState(prev => ({
-                ...prev,
-                players: updatedPlayers,
-                currentHighBet: 0,
-                phase: nextPhaseEnum,
-                communityCards: nextCommCards,
-                deck,
-                message: `Dealing ${nextPhaseEnum}...`
-             }));
-             setTimeout(nextPhase, 1500); 
-             return;
-        }
+    // Auto-advance if no one can bet (everyone all-in or folded)
+    const canStillBet = updatedPlayers.filter(p => p.status === PlayerStatus.ACTIVE).length;
+    if (canStillBet < 2) {
+        setGameState(prev => ({
+            ...prev, players: updatedPlayers, currentHighBet: 0, phase: nextPhaseEnum, communityCards: nextCommCards, deck,
+            message: `Dealing ${nextPhaseEnum}...`
+        }));
+        setTimeout(() => nextPhase(), 800);
+        return;
     }
 
     setGameState(prev => ({
-        ...prev,
-        players: updatedPlayers,
-        currentHighBet: 0,
-        activePlayerIndex: firstIdx,
-        phase: nextPhaseEnum,
-        communityCards: nextCommCards,
-        deck,
+        ...prev, players: updatedPlayers, currentHighBet: 0, activePlayerIndex: firstIdx, phase: nextPhaseEnum, communityCards: nextCommCards, deck,
         message: `Dealing ${nextPhaseEnum}...`
     }));
   };
@@ -450,33 +358,17 @@ const App: React.FC = () => {
   const resolveWinner = (currentPlayers: Player[]) => {
     const activeAndAllIn = currentPlayers.filter(p => p.status !== PlayerStatus.FOLDED && p.status !== PlayerStatus.BUSTED);
     const commCards = gameStateRef.current.communityCards;
-    
     let results: ShowdownResult[] = [];
 
     if (activeAndAllIn.length === 1) {
-        // Everyone else folded
         const w = activeAndAllIn[0];
         results.push({
-            playerId: w.id,
-            name: w.name,
-            role: w.role,
-            handDescription: 'Last Player Standing',
-            holeCards: w.hand,
-            winningCards: [],
-            amount: gameStateRef.current.pot,
-            isWinner: true,
-            score: 9999
+            playerId: w.id, name: w.name, role: w.role, handDescription: 'Last Player Standing', holeCards: w.hand,
+            winningCards: [], amount: gameStateRef.current.pot, isWinner: true, score: 9999
         });
     } else {
-        // Showdown calculation for ALL active players
-        const evaluated = activeAndAllIn.map(p => ({
-            player: p,
-            rank: evaluateHand(p.hand, commCards)
-        }));
-        
-        // Sort by score descending
+        const evaluated = activeAndAllIn.map(p => ({ player: p, rank: evaluateHand(p.hand, commCards) }));
         evaluated.sort((a, b) => b.rank.score - a.rank.score);
-        
         const bestScore = evaluated[0].rank.score;
         const ties = evaluated.filter(r => r.rank.score === bestScore);
         const splitAmt = Math.floor(gameStateRef.current.pot / ties.length);
@@ -484,81 +376,43 @@ const App: React.FC = () => {
         results = evaluated.map(e => {
             const isWinner = e.rank.score === bestScore;
             return {
-                playerId: e.player.id,
-                name: e.player.name,
-                role: e.player.role,
-                handDescription: e.rank.name,
-                holeCards: e.player.hand,
-                winningCards: e.rank.cards,
-                amount: isWinner ? splitAmt : 0,
-                isWinner: isWinner,
-                score: e.rank.score
+                playerId: e.player.id, name: e.player.name, role: e.player.role, handDescription: e.rank.name,
+                holeCards: e.player.hand, winningCards: e.rank.cards, amount: isWinner ? splitAmt : 0, isWinner: isWinner, score: e.rank.score
             };
         });
     }
 
-    // Distribute Chips
     const nextPlayers = currentPlayers.map(p => {
         const res = results.find(r => r.playerId === p.id);
         if (res && res.isWinner) {
-            return { ...p, chips: p.chips + res.amount, status: p.chips + res.amount > 0 ? PlayerStatus.ACTIVE : PlayerStatus.BUSTED };
+            return { ...p, chips: p.chips + res.amount };
         }
         return p;
     });
 
-    // Find winners for text display
-    const actualWinners = results.filter(r => r.isWinner);
-    const winMsg = actualWinners.length > 1 ? "Split Pot!" : `${actualWinners[0].name} Wins!`;
-
     setGameState(prev => ({
-        ...prev,
-        players: nextPlayers,
-        phase: GamePhase.SHOWDOWN,
-        activePlayerIndex: -1,
-        showdownResults: results,
-        message: winMsg
+        ...prev, players: nextPlayers, phase: GamePhase.SHOWDOWN, activePlayerIndex: -1, showdownResults: results,
+        message: results.filter(r => r.isWinner).length > 1 ? "Split Pot!" : `${results.find(r => r.isWinner)?.name} Wins!`
     }));
   };
 
   const handleNextHand = () => {
     const currentState = gameStateRef.current;
-    
-    // Logic: The game only ends if explicitly triggered by startNewHand when only 1 player is left.
-    // We just try to start a new hand.
-    
     const nextDealer = (currentState.dealerIndex + 1) % TOTAL_PLAYERS;
     startNewHand(currentState.players, nextDealer);
   };
 
-  // -------------------------------------------------------------------------
-  // UI Render
-  // -------------------------------------------------------------------------
-  
   if (setupMode) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white p-4">
         <h1 className="text-4xl md:text-6xl font-bold mb-8 text-yellow-500">Gemini Poker</h1>
         <div className="bg-gray-800 p-8 rounded-lg shadow-2xl w-full max-w-md">
            <label className="block mb-4">
-             <span className="text-gray-300">Initial Buy-In ($)</span>
-             <input 
-               type="number" 
-               value={buyIn} 
-               onChange={(e) => setBuyIn(parseInt(e.target.value))}
-               className="mt-1 block w-full rounded-md bg-gray-700 border-transparent focus:border-yellow-500 focus:ring-0 text-white p-2"
-             />
+             <span className="text-gray-300 font-bold">Initial Buy-In ($)</span>
+             <input type="number" value={buyIn} onChange={(e) => setBuyIn(parseInt(e.target.value))} className="mt-1 block w-full rounded-md bg-gray-700 border-transparent focus:border-yellow-500 text-white p-3 font-mono" />
            </label>
-           <button 
-             onClick={startGame}
-             className="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 px-4 rounded transition duration-200"
-           >
-             Sit at the Table
-           </button>
-           <p className="mt-4 text-sm text-gray-500 text-center">
-             You will face 8 AI opponents powered by Google Gemini.
-             <br/>
-             Good Luck!
-           </p>
+           <button onClick={startGame} className="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-black py-4 rounded shadow-xl transition-all transform hover:scale-105">Sit at the Table</button>
+           <p className="mt-6 text-xs text-gray-500 text-center leading-relaxed">Facing 8 AI opponents. The game only ends when you lose everything or you become the sole winner of all chips.</p>
         </div>
       </div>
     );
@@ -568,205 +422,62 @@ const App: React.FC = () => {
      const userPlayer = gameState.players.find(p => p.role === PlayerRole.USER);
      const userIndex = userPlayer ? userPlayer.id : 0;
      const relativeIdx = (index - userIndex + TOTAL_PLAYERS) % TOTAL_PLAYERS;
-     const angleStep = 360 / TOTAL_PLAYERS;
-     const angleDeg = 90 + (relativeIdx * angleStep);
+     const angleDeg = 90 + (relativeIdx * (360 / TOTAL_PLAYERS));
      const angleRad = (angleDeg * Math.PI) / 180;
-     const rx = 42; 
-     const ry = 35; 
-     const x = 50 + rx * Math.cos(angleRad);
-     const y = 50 + ry * Math.sin(angleRad);
-     return { left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' };
+     return { left: `${50 + 42 * Math.cos(angleRad)}%`, top: `${50 + 35 * Math.sin(angleRad)}%`, transform: 'translate(-50%, -50%)' };
   };
 
   const userPlayer = gameState.players.find(p => p.role === PlayerRole.USER);
   const canUserAct = gameState.activePlayerIndex === userPlayer?.id && gameState.isGameRunning && gameState.phase !== GamePhase.SHOWDOWN && gameState.phase !== GamePhase.GAME_OVER;
   
-  // Helper to check if a card is in the winning hand for the winner
-  const isWinningCard = (card: Card, winnerResult?: ShowdownResult) => {
-      if (!winnerResult) return false;
-      return winnerResult.winningCards.some(wc => wc.rank === card.rank && wc.suit === card.suit);
-  };
-  // Helper for current player result highlighting
-  const isUsedCard = (card: Card, result: ShowdownResult) => {
-      return result.winningCards.some(wc => wc.rank === card.rank && wc.suit === card.suit);
-  };
-
-  const winnerResult = gameState.showdownResults.length > 0 ? gameState.showdownResults.filter(r => r.isWinner)[0] : undefined;
-  const endTitleText = winnerResult ? (gameState.showdownResults.filter(r => r.isWinner).length > 1 ? "Split Pot" : `${winnerResult.name} Wins!`) : "";
-
   return (
-    <div className="relative w-full h-screen bg-gray-900 overflow-hidden">
-      {/* Restart/Exit Button */}
-      <div className="absolute top-4 right-4 z-50">
-          <button 
-            onClick={quitGame}
-            className="px-4 py-2 bg-gray-700 hover:bg-red-600 text-white text-sm font-bold rounded shadow-lg transition-colors border border-gray-500"
-          >
-            Restart / Exit
-          </button>
+    <div className="relative w-full h-screen bg-gray-950 overflow-hidden">
+      <div className="absolute top-4 right-4 z-50 flex gap-2">
+          <button onClick={quitGame} className="px-3 py-1 bg-gray-800 hover:bg-red-900 text-gray-300 text-xs rounded border border-gray-700 transition-colors">Restart / Exit</button>
       </div>
 
-      {/* Table Background */}
-      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[95%] h-[60%] md:w-[80%] md:h-[70%] felt-texture rounded-[200px] border-[16px] border-[#3e2723] shadow-2xl flex items-center justify-center">
-         {/* Community Cards */}
+      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-[92%] h-[58%] md:w-[75%] md:h-[65%] felt-texture rounded-[200px] border-[14px] border-[#2e1a1a] shadow-[inset_0_0_100px_rgba(0,0,0,0.8)] flex items-center justify-center">
          <div className="flex gap-2">
-            {gameState.communityCards.map((c, i) => (
-                <CardComponent key={i} card={c} />
-            ))}
-            {Array.from({length: 5 - gameState.communityCards.length}).map((_, i) => (
-                 <div key={i} className="w-10 h-14 md:w-14 md:h-20 border-2 border-white/20 rounded bg-black/10"></div>
-            ))}
+            {gameState.communityCards.map((c, i) => <CardComponent key={i} card={c} />)}
+            {Array.from({length: 5 - gameState.communityCards.length}).map((_, i) => <div key={i} className="w-10 h-14 md:w-14 md:h-20 border border-white/10 rounded bg-black/5"></div>)}
          </div>
-         
-         {/* Pot Info */}
-         <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center">
-             <div className="text-yellow-400 font-bold text-lg md:text-2xl drop-shadow-md">Pot: ${gameState.pot}</div>
-             <div className="text-white/60 text-xs md:text-sm">{gameState.message}</div>
+         <div className="absolute top-1/3 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
+             <div className="text-yellow-400 font-black text-2xl md:text-4xl drop-shadow-lg mb-1">$ {gameState.pot}</div>
+             <div className="text-white/40 text-[10px] md:text-xs uppercase tracking-widest">{gameState.message}</div>
          </div>
       </div>
 
-      {/* Players */}
-      {gameState.players.map((p) => (
-        <PlayerSeat 
-            key={p.id} 
-            player={p} 
-            isActive={gameState.activePlayerIndex === p.id}
-            isDealer={gameState.dealerIndex === p.id}
-            phase={gameState.phase}
-            positionStyle={getPosition(p.id)}
-        />
-      ))}
+      {gameState.players.map((p) => <PlayerSeat key={p.id} player={p} isActive={gameState.activePlayerIndex === p.id} isDealer={gameState.dealerIndex === p.id} phase={gameState.phase} positionStyle={getPosition(p.id)} />)}
 
-      {/* Showdown Results Overlay */}
-      {gameState.phase === GamePhase.SHOWDOWN && gameState.showdownResults.length > 0 && (
+      {gameState.phase === GamePhase.SHOWDOWN && (
          <div className="absolute inset-0 bg-black/95 z-50 flex flex-col items-center justify-start animate-fade-in p-4 overflow-y-auto">
-             
-             {/* Header */}
-             <div className="mt-8 mb-6 text-center">
-                 <h2 className="text-4xl md:text-5xl text-yellow-500 font-bold animate-bounce drop-shadow-lg mb-4">
-                    {endTitleText}
-                 </h2>
-                 {/* Community Cards Display in Overlay */}
-                 <div className="flex flex-col items-center p-4 bg-green-900/30 rounded-xl border border-green-800">
-                    <span className="text-gray-400 text-xs uppercase tracking-widest mb-2">Community Cards</span>
-                    <div className="flex gap-2">
-                        {gameState.communityCards.map((c, i) => (
-                            <CardComponent 
-                                key={i} 
-                                card={c} 
-                                className={`transform transition-all ${isWinningCard(c, winnerResult) ? 'scale-110 ring-4 ring-yellow-400 z-10' : 'opacity-75 scale-95'}`} 
-                            />
-                        ))}
-                    </div>
-                 </div>
+             <div className="mt-12 text-center">
+                 <h2 className="text-4xl md:text-6xl text-yellow-500 font-black mb-8 drop-shadow-lg uppercase tracking-tighter italic">Hand Over</h2>
+                 <button onClick={handleNextHand} className="px-16 py-4 bg-yellow-500 hover:bg-yellow-400 text-black font-black uppercase rounded-full text-xl shadow-2xl transition-transform active:scale-95 border-b-4 border-yellow-700">Next Hand</button>
              </div>
-
-             {/* Results Grid */}
-             <div className="flex flex-col gap-3 w-full max-w-5xl px-2 pb-24">
+             <div className="flex flex-col gap-3 w-full max-w-4xl mt-12 mb-24 px-4">
                  {gameState.showdownResults.map((result, idx) => (
-                    <div 
-                        key={idx} 
-                        className={`flex flex-col md:flex-row items-center justify-between p-4 rounded-xl border-2 transition-all
-                        ${result.isWinner ? 'bg-gradient-to-r from-green-900/50 to-green-800/50 border-yellow-500 shadow-[0_0_30px_rgba(234,179,8,0.2)] scale-[1.02]' : 'bg-gray-800/60 border-gray-700'}`}
-                    >
-                        {/* Player Info */}
-                        <div className="flex items-center gap-4 w-full md:w-1/4 mb-4 md:mb-0">
-                            <div className={`text-xl font-bold truncate ${result.isWinner ? 'text-yellow-300' : 'text-gray-300'}`}>
-                                {result.name}
-                            </div>
-                            {result.amount > 0 && (
-                                <div className="bg-green-500/20 text-green-400 px-3 py-1 rounded-full font-mono font-bold border border-green-500/50">
-                                    +${result.amount}
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Hole Cards - Highlight used cards */}
-                        <div className="flex flex-col items-center w-full md:w-1/4 mb-4 md:mb-0">
-                            <span className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Hole Cards</span>
-                            <div className="flex gap-2">
-                                {result.holeCards.map((c, i) => (
-                                    <CardComponent 
-                                        key={i} 
-                                        card={c} 
-                                        className={`transform transition-all ${isUsedCard(c, result) ? 'ring-2 ring-yellow-400 -translate-y-2' : 'brightness-75'}`}
-                                    />
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Hand Name */}
-                        <div className="w-full md:w-1/5 text-center mb-4 md:mb-0">
-                             <div className={`font-bold text-lg ${result.isWinner ? 'text-white' : 'text-gray-400'}`}>
-                                {result.handDescription}
-                             </div>
-                        </div>
-
-                        {/* Best 5 Combo Display */}
-                        <div className="flex flex-col items-center w-full md:w-1/3 bg-black/20 p-2 rounded-lg">
-                            <span className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Winning Hand</span>
-                            <div className="flex gap-1">
-                                {result.winningCards.length > 0 ? (
-                                    result.winningCards.map((c, i) => (
-                                        <CardComponent key={i} card={c} className={`scale-75 origin-center ${result.isWinner ? 'ring-1 ring-yellow-400/50' : ''}`} />
-                                    ))
-                                ) : (
-                                    <span className="text-sm text-gray-500 italic">Folded</span>
-                                )}
-                            </div>
-                        </div>
+                    <div key={idx} className={`flex items-center justify-between p-4 rounded-xl border-2 ${result.isWinner ? 'bg-green-900/40 border-yellow-500' : 'bg-gray-800/40 border-gray-700'}`}>
+                        <div className="w-1/3 font-bold text-lg">{result.name} {result.isWinner && '🏆'}</div>
+                        <div className="w-1/3 text-center italic text-gray-400">{result.handDescription}</div>
+                        <div className="w-1/3 text-right text-yellow-500 font-mono font-bold">{result.amount > 0 ? `+$${result.amount}` : '-'}</div>
                     </div>
                  ))}
              </div>
-             
-             {/* Bottom Floating Button */}
-             <div className="fixed bottom-8 z-50">
-                <button 
-                    onClick={handleNextHand}
-                    className="px-12 py-4 bg-gradient-to-r from-yellow-600 to-yellow-500 hover:from-yellow-500 hover:to-yellow-400 text-black font-black uppercase tracking-widest rounded-full text-xl shadow-[0_0_30px_rgba(234,179,8,0.6)] active:scale-95 transition-all transform hover:-translate-y-1 border-4 border-yellow-300"
-                >
-                    Next Hand
-                </button>
-             </div>
          </div>
       )}
 
-      {/* Game Over Screen */}
       {gameState.phase === GamePhase.GAME_OVER && (
-          <div className="absolute inset-0 bg-black/95 z-50 flex flex-col items-center justify-center animate-fade-in p-4">
-              {userPlayer?.status === PlayerStatus.BUSTED ? (
-                  <>
-                    <h2 className="text-6xl md:text-8xl font-black text-red-600 mb-6 drop-shadow-[0_0_20px_rgba(220,38,38,0.6)]">DEFEAT</h2>
-                    <p className="text-2xl text-gray-400 mb-12">You have been eliminated.</p>
-                  </>
-              ) : (
-                  <>
-                    <h2 className="text-6xl md:text-8xl font-black text-yellow-500 mb-6 drop-shadow-[0_0_30px_rgba(234,179,8,0.8)] animate-pulse">CHAMPION!</h2>
-                    <p className="text-2xl text-white mb-12">You are the last player standing!</p>
-                  </>
-              )}
-              
-              <button 
-                onClick={quitGame}
-                className="px-12 py-5 bg-white text-black font-black uppercase tracking-widest rounded-full text-xl shadow-2xl hover:bg-gray-200 transition-colors"
-              >
-                Return to Menu
-              </button>
+          <div className="absolute inset-0 bg-black/98 z-50 flex flex-col items-center justify-center animate-fade-in p-4 text-center">
+              <h2 className={`text-6xl md:text-9xl font-black mb-4 uppercase ${userPlayer?.status === PlayerStatus.BUSTED ? 'text-red-600' : 'text-yellow-500 animate-pulse'}`}>
+                {userPlayer?.status === PlayerStatus.BUSTED ? 'Game Over' : 'Champion!'}
+              </h2>
+              <p className="text-xl md:text-3xl text-gray-400 mb-12 max-w-2xl">{gameState.message}</p>
+              <button onClick={quitGame} className="px-16 py-5 bg-white text-black font-black uppercase tracking-widest rounded-full text-xl hover:bg-gray-200 transition-colors shadow-2xl">Play Again</button>
           </div>
       )}
 
-      {/* User Controls */}
-      {userPlayer && (
-          <Controls 
-            canAct={canUserAct}
-            onAction={(action, amt) => executePlayerAction(userPlayer.id, action, amt)}
-            callAmount={gameState.currentHighBet - userPlayer.currentBet}
-            minRaise={gameState.currentHighBet > 0 ? gameState.currentHighBet * 2 : gameState.minBet}
-            userChips={userPlayer.chips}
-            step={10}
-            isBettingRoundOpen={gameState.currentHighBet === 0}
-          />
-      )}
+      {userPlayer && <Controls canAct={canUserAct} onAction={(action, amt) => executePlayerAction(userPlayer.id, action, amt)} callAmount={gameState.currentHighBet - userPlayer.currentBet} minRaise={gameState.currentHighBet > 0 ? gameState.currentHighBet * 2 : gameState.minBet} userChips={userPlayer.chips} step={10} isBettingRoundOpen={gameState.currentHighBet === 0} />}
     </div>
   );
 };
